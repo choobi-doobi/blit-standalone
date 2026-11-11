@@ -1,0 +1,23 @@
+@tailwind base;
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+html[data-theme='dark'] body {
+  background: #1f1f1f;
+  color-scheme: dark;
+}
+
+html[data-theme='light'] body {
+  background: #fafafa;
+  color-scheme: light;
+}
+
+body {
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --font-mono: ui-monospace, 'Cascadia Code', 'JetBrains Mono', Menlo, Consolas, monospace;
+}

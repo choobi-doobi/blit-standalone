@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "blit": {
+      "command": "npx",
+      "args": ["tsx", "mcp/server.ts"],
+      "env": { "BLIT_URL": "http://127.0.0.1:3000" }
+    }
+  }
+}

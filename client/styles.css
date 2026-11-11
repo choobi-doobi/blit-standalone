@@ -1,0 +1,79 @@
+/*
+ * Blit's own styles: layout and utilities that carry NO theme colour.
+ *
+ * Blit's chrome is the real `@fluentui/react-components` v9 design system. Its
+ * colour, elevation and typography come from the Fluent theme's tokens, applied
+ * by the `<FluentProvider>` in `pages/BlitPage.tsx` and read through Griffel
+ * `makeStyles` (see `components/chrome.ts`, `components/fluent.tsx`,
+ * `components/fluentPanels.tsx`). Nothing here declares a Fluent value; there is
+ * no hand-authored token skin any more. `lib/blitIdentity.test.ts` holds that
+ * boundary.
+ *
+ * Compiled by the sibling Core repository's scripts/build-module.ts with content
+ * scoped to this repository's client/, then inlined into the federation entry as
+ * a <style> tag at runtime. We intentionally skip @tailwind base: the host
+ * already injects preflight and the design-token CSS variables. Without the
+ * directive below the plugin ships NO utility classes of its own and silently
+ * borrows whichever ones the host's own bundle happens to contain, so anything
+ * the host never uses (top-3, gap-1.5, w-[320px]) renders as nothing at all.
+ */
+@tailwind utilities;
+
+/*
+ * The transparency backdrop. A pixel-art canvas is mostly holes, and without a
+ * checkerboard behind it "transparent" and "the same colour as the page" are
+ * indistinguishable, which makes a sprite's silhouette impossible to judge.
+ *
+ * Built from gradients rather than an image so it needs no asset and stays crisp
+ * at any device pixel ratio. The greys are alpha over the page, so it reads on
+ * all three themes without a per-theme override.
+ */
+/* blit-neutral-alpha: see the note above. Alpha over the page, not a colour. */
+.blit-transparency {
+  background-image:
+    linear-gradient(45deg, rgb(128 128 128 / 0.16) 25%, transparent 25%),
+    linear-gradient(-45deg, rgb(128 128 128 / 0.16) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, rgb(128 128 128 / 0.16) 75%),
+    linear-gradient(-45deg, transparent 75%, rgb(128 128 128 / 0.16) 75%);
+  background-size: 12px 12px;
+  background-position: 0 0, 0 6px, 6px -6px, -6px 0;
+}
+
+/* The editor owns its own scrolling; the pane must not grow to fit the document. */
+.blit-editor .cm-editor {
+  height: 100%;
+}
+
+.blit-editor .cm-scroller {
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+
+/*
+ * Coarse-pointer targets. Blit's densest controls are deliberately small on a
+ * mouse: a palette swatch is a 32px chip and a zoom step is a ~24px chip,
+ * because a pixel artist wants many of them in view at once. Under a coarse
+ * pointer that density is unusable, so every such control carries `blit-tap` and
+ * grows to the 44px minimum without the desktop layout paying for it.
+ */
+@media (pointer: coarse) {
+  .blit-tap {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+
+/*
+ * Every Fluent motion in Blit is decoration: a skeleton shimmer, a sliding
+ * drawer, a growing underline. None of it carries information, so under a
+ * reduced-motion preference it is dropped outright rather than shortened. Scoped
+ * to Blit's own subtree by the `.blit-fluent` marker on the FluentProvider root.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .blit-fluent *,
+  .blit-fluent *::before,
+  .blit-fluent *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -1,0 +1,1508 @@
+{
+  "tags": [
+    {
+      "name": "Blit",
+      "description": "Live-code pixel art and sprite animation. Sketches are JavaScript that builds a pattern from the Blit algebra; the server stores their source and nothing else. Canvas size, frame rate and cycle length are declared by the sketch itself (size(), fps(), cycle()), so they are not fields on these resources. Zoom is the one view setting a sketch cannot declare, so it is stored per sketch. Evaluation and rendering happen in the browser, with one exception: POST /api/blit/render runs a sketch on the server to answer a PNG, inside a sandbox (a separate Node process with no environment, no file or process access, a heap cap and a time limit, evaluating in a null-prototype vm context that only strings cross). POST /api/blit/lint parses source to report mistakes without running it. POST /api/blit/import reads a PNG and writes sprite source for it. Sketches can be filed in nested folders: a folder is a name and a parent, and deleting one moves its contents up a level rather than deleting them."
+    }
+  ],
+  "paths": {
+    "/api/blit/status": {
+      "get": {
+        "tags": [
+          "Blit"
+        ],
+        "summary": "Get server status",
+        "description": "Liveness check. Returns the module id, its operational state, and the server's current time as an ISO 8601 string. Requires authentication.",
+        "operationId": "blit_get_status",
+        "responses": {
+          "200": {
+            "description": "The server is up.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlitStatus"
+                }
+              }
+            }
+          }
+        },
+        "x-mcp": false
+      }
+    },
+    "/api/blit/lint": {
+      "post": {
+        "tags": [
+          "Blit"
+        ],
+        "summary": "Check a sketch without saving or running it",
+        "description": "Static check of sketch source: reports syntax errors, names that are neither in the language nor defined by the sketch, operators a pattern does not have, and statement-form sketches that never call out() and so can never produce a pattern. Positions are 1-based and come from the same grammar the editor's gutter uses, so a reported line matches what a person would see. The WORDING of a syntax error differs from the editor's, which quotes V8; there is no engine on this path. Nothing is stored and no sketch code is executed: the check parses and reads the tree. Errors mean the sketch cannot run; warnings mean it may not do what was intended, and do not clear `ok`. Anything that only happens while the pattern renders, such as a character with no colour or a sketch that returns a non-pattern, is invisible here.",
+        "operationId": "blit_lint_sketch",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "maxLength": 200000,
+                    "description": "The sketch source to check, exactly as it would be saved.",
+                    "example": "size(16, 16);\n\nout(sprite(`\n  .ww.\n  wwww\n`).mirrror('x'));"
+                  }
+                },
+                "required": [
+                  "code"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The check ran. `ok` says whether anything would stop the sketch.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlitLintResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`code` is missing, not a string, or longer than 200000 characters.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/blit/sketches": {
+      "get": {
+        "tags": [
+          "Blit"
+        ],
+        "summary": "List the caller's sketches",
+        "description": "Returns every sketch, most recently edited first, with ties broken by descending id so two saves in the same second still order deterministically. `code` is omitted: fetch a single sketch to get its source.",
+        "operationId": "blit_list_sketches",
+        "responses": {
+          "200": {
+            "description": "The caller's sketches, newest edit first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "example": true
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/BlitSketchSummary"
+                      }
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "data"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Blit"
+        ],
+        "summary": "Create a sketch",
+        "description": "Saves a new sketch owned by the caller. `name` is trimmed and must be non-blank and at most 120 characters. `code` defaults to an empty string and may be at most 200000 characters; it is stored verbatim, backticks and newlines included, because sprite literals depend on exact whitespace. The code is never parsed or executed server side. `zoom` is how closely the canvas opens it and defaults to 2; it must be one of the steps the editor offers. `folder_id` files it in one of the caller's folders; omitted or null is the top level, and a folder that is not the caller's answers 404.",
+        "operationId": "blit_create_sketch",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 120,
+                    "description": "Display name. Leading and trailing whitespace is trimmed.",
+                    "example": "Ship"
+                  },
+                  "code": {
+                    "type": "string",
+                    "maxLength": 200000,
+                    "description": "The sketch source. Defaults to an empty string when omitted.",
+                    "example": "size(16, 16);\n\nout(sprite(`\n  .ww.\n  wwww\n`).scale(2).center());"
+                  },
+                  "zoom": {
+                    "type": "integer",
+                    "enum": [
+                      1,
+                      2,
+                      4,
+                      8,
+                      12,
+                      16
+                    ],
+                    "description": "How closely the canvas opens this sketch: the canvas is drawn at this many screen pixels per sketch pixel. One of 1, 2, 4, 8, 12 or 16 \u2014 the steps the editor offers \u2014 and anything else is a 400. Unlike the canvas size, the frame rate and the cycle length, zoom cannot be declared in the sketch, so it is stored per sketch here rather than per browser. Defaults to 2.",
+                    "example": 2
+                  },
+                  "folder_id": {
+                    "type": "integer",
+                    "nullable": true,
+                    "minimum": 1,
+                    "description": "Where to file the new sketch. A folder id, or null for the top level. Only null means the top level: 0, an empty string or false is a 400 rather than silently read as \"nowhere\". Omitted means the top level."
+                  }
+                },
+                "required": [
+                  "name"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The stored sketch.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlitSketchResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The name is missing, blank, or too long, the code is not a string or is too long, or the zoom is not one of the steps.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`folder_id` names no folder of the caller's.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/blit/sketches/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "description": "The sketch id. Must be a positive integer.",
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      ],
+      "get": {
+        "tags": [
+          "Blit"
+        ],
+        "summary": "Get one sketch, source included",
+        "description": "Returns the sketch and its source.",
+        "operationId": "blit_get_sketch",
+        "responses": {
+          "200": {
+            "description": "The sketch.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlitSketchResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The id is not a positive integer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such sketch, or it belongs to another user.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "Blit"
+        ],
+        "summary": "Rename a sketch, save new source, save the zoom, or any combination",
+        "description": "Updates the fields present in the body and leaves the rest alone, then moves `updated_at`. The read, the merge and the write run in one transaction, so two saves of the same sketch arriving together cannot lose one of them. At least one of `name`, `code` or `zoom` must be present: an empty body answers 400 rather than silently touching the timestamp. An explicit empty-string `code` is honoured as a deliberate clear. A save that omits `zoom` leaves the stored view alone.",
+        "operationId": "blit_update_sketch",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "minProperties": 1,
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 120
+                  },
+                  "code": {
+                    "type": "string",
+                    "maxLength": 200000
+                  },
+                  "zoom": {
+                    "type": "integer",
+                    "enum": [
+                      1,
+                      2,
+                      4,
+                      8,
+                      12,
+                      16
+                    ],
+                    "description": "How closely the canvas opens this sketch: the canvas is drawn at this many screen pixels per sketch pixel. One of 1, 2, 4, 8, 12 or 16 \u2014 the steps the editor offers \u2014 and anything else is a 400. Unlike the canvas size, the frame rate and the cycle length, zoom cannot be declared in the sketch, so it is stored per sketch here rather than per browser. Defaults to 2."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The updated sketch.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlitSketchResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The id is invalid, the body is empty, or a supplied field fails validation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such sketch, or it belongs to another user.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Blit"
+        ],
+        "summary": "Delete a sketch",
+        "description": "Removes the sketch permanently. Answers 204 with no body. A sketch belonging to another user answers 404 and is left untouched.",
+        "operationId": "blit_delete_sketch",
+        "responses": {
+          "204": {
+            "description": "Deleted. No body."
+          },
+          "400": {
+            "description": "The id is not a positive integer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such sketch, or it belongs to another user.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "x-mcp": false
+      }
+    },
+    "/api/blit/sketches/{id}/folder": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "description": "The sketch id. Must be a positive integer.",
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      ],
+      "put": {
+        "tags": [
+          "Blit"
+        ],
+        "summary": "File a sketch in a folder, or at the top level",
+        "description": "Moves the sketch into the folder named by `folder_id`, or to the top level when it is null. Only `folder_id` changes: name, code, zoom and `updated_at` are left exactly as they were, so filing a sketch away does not reorder the most-recently-edited list. Idempotent.",
+        "operationId": "blit_move_sketch_to_folder",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "folder_id"
+                ],
+                "properties": {
+                  "folder_id": {
+                    "type": "integer",
+                    "nullable": true,
+                    "minimum": 1,
+                    "description": "A folder id, or null for the top level. Only null means the top level: 0, an empty string or false is a 400 rather than silently read as \"nowhere\"."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The sketch, in its new place.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlitSketchResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The id is invalid, or `folder_id` is missing or not a folder id or null.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such sketch or folder, or it belongs to another user.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/blit/folders": {
+      "get": {
+        "tags": [
+          "Blit"
+        ],
+        "summary": "List the caller's folders",
+        "description": "Every folder the caller has, flat and alphabetical (case ignored). The tree is rebuilt by following `parent_id`. Another user's folders are never included.",
+        "operationId": "blit_list_folders",
+        "responses": {
+          "200": {
+            "description": "The caller's folders.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlitFolderListResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Blit"
+        ],
+        "summary": "Create a folder",
+        "description": "Creates a folder at the top level, or inside `parent_id`. `name` is trimmed and must be non-blank and at most 120 characters. Two folders side by side cannot share a name, compared without case: a clash is a 409 naming the folder already there.",
+        "operationId": "blit_create_folder",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 120,
+                    "description": "Folder name. Leading and trailing whitespace is trimmed.",
+                    "example": "Enemies"
+                  },
+                  "parent_id": {
+                    "type": "integer",
+                    "nullable": true,
+                    "minimum": 1,
+                    "description": "The folder to create it inside. A folder id, or null for the top level. Only null means the top level: 0, an empty string or false is a 400 rather than silently read as \"nowhere\". Omitted means the top level."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The new folder.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlitFolderResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The name is blank or too long, or `parent_id` is not a folder id or null.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`parent_id` names no folder of the caller's.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A folder beside it already has that name.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/blit/folders/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "description": "The folder id. Must be a positive integer.",
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      ],
+      "patch": {
+        "tags": [
+          "Blit"
+        ],
+        "summary": "Rename a folder, move it, or both",
+        "description": "Renames the folder, moves it inside `parent_id` (null for the top level), or both; at least one must be present. Everything inside moves with it. Moving a folder inside itself or anything under it is a 400, and a name a folder at the destination already has is a 409.",
+        "operationId": "blit_rename_folder",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "minProperties": 1,
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 120
+                  },
+                  "parent_id": {
+                    "type": "integer",
+                    "nullable": true,
+                    "minimum": 1,
+                    "description": "Where to move the folder. A folder id, or null for the top level. Only null means the top level: 0, an empty string or false is a 400 rather than silently read as \"nowhere\"."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The folder.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlitFolderResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The id is invalid, the body is empty, a field fails validation, or the move would put the folder inside itself.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such folder or parent, or it belongs to another user.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A folder at the destination already has that name.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Blit"
+        ],
+        "summary": "Delete a folder, keeping what was in it",
+        "description": "Removes the folder and nothing else: its sketches and its folders move up to the folder's own parent (the top level if it had none), in one transaction. No sketch is ever deleted by this route and none has its `updated_at` changed. A folder that meets a namesake on the way up is renamed with a \" (2)\", \" (3)\"\u2026 suffix rather than refusing the delete.",
+        "operationId": "blit_delete_folder",
+        "responses": {
+          "200": {
+            "description": "What moved, and where.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlitFolderDeleteResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The id is not a positive integer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such folder, or it belongs to another user.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "x-mcp": false
+      }
+    },
+    "/api/blit/import": {
+      "post": {
+        "tags": [
+          "Blit"
+        ],
+        "summary": "Turn a PNG into sprite source, downscaling to a chosen size",
+        "description": "Reads a PNG and answers the `sprite()` grid and `.pal()` that reproduce it, as text. Two limits apply and they are different numbers: a file may be up to 1024x1024, and a grid stops at 128x128 because a sprite literal is one character per pixel. Anything between them needs a `size`, which is the longest side of the grid to emit; the other side follows the aspect ratio. The resize is nearest-neighbour and only nearest-neighbour, so every colour in the answer is a colour that was in the file: an averaging filter would invent colours the palette then has to name. An image that is a whole-number upscale of a smaller one comes back byte for byte at the size it was drawn at, which is the case this route mainly exists for. Called without a `size`, an image that already fits is imported as it is and a bigger one is not guessed at: the answer is `refusal` plus `options`, one entry per size it could be imported at with the grid and the colour count at each. A size whose grid would need more colours than a literal can name is the same shape of answer, because the measurement is the useful part and an error would throw it away. Nothing is stored, and no sketch code is parsed or executed on this path.",
+        "operationId": "blit_import_png",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "png": {
+                    "type": "string",
+                    "format": "byte",
+                    "description": "The PNG file, base64 encoded. A `data:image/png;base64,` prefix is accepted and stripped. Up to 1024x1024 and 12MB."
+                  },
+                  "size": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 128,
+                    "description": "Longest side of the grid to emit. Omitted means no resize, which only works for an image that already fits. A size at or above the image's longest side is the image.",
+                    "example": 32
+                  }
+                },
+                "required": [
+                  "png"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The image was read. `sprite` is present when a grid could be emitted; otherwise `refusal` says why and `options` says what to ask for instead.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlitImportResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`png` is missing, not base64, not a PNG, over 12MB, or larger than 1024x1024; or `size` is not a whole number between 1 and 128.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/blit/render": {
+      "post": {
+        "tags": [
+          "Blit"
+        ],
+        "summary": "Render a sketch to a PNG",
+        "description": "Runs a saved sketch (`id`) or unsaved source (`code`) with the real Blit engine, in a sandbox, and answers the picture as `image/png`. One frame, or `count` consecutive frames laid out as a contact sheet (left to right, then down, separated by a grey gutter), upscaled nearest-neighbour. Transparent pixels are composited over a dark checkerboard unless `background` says otherwise. Audio is silent. `blit()` references resolve against the caller's own sketches. Response headers carry the canvas size (`X-Blit-Size`), the frames drawn (`X-Blit-Frames`), the scale used (`X-Blit-Scale`) and any palette warnings (`X-Blit-Warnings`). Stores nothing.",
+        "operationId": "blit_render_sketch",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "A saved sketch owned by the caller."
+                  },
+                  "code": {
+                    "type": "string",
+                    "maxLength": 200000,
+                    "description": "Source to render. Wins over the saved code when both are sent; `id` then only identifies the sketch so a scene cannot place itself."
+                  },
+                  "frame": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 0,
+                    "description": "The first frame to render."
+                  },
+                  "count": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 16,
+                    "default": 1,
+                    "description": "Consecutive frames to render."
+                  },
+                  "scale": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 16,
+                    "description": "Screen pixels per sketch pixel. Omitted: the largest that keeps the longest side within 1024px."
+                  },
+                  "background": {
+                    "type": "string",
+                    "default": "checker",
+                    "description": "'checker', 'transparent', or a colour such as '#1a1c2c'."
+                  }
+                },
+                "example": {
+                  "code": "size(16, 16); out(circle(6, '#41a6f6').center())",
+                  "count": 1
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The rendered PNG.",
+            "content": {
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Neither `id` nor `code`, or an argument out of range, or an image that would exceed 2048px on a side.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such sketch, or it belongs to someone else.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The sketch did not compile or run (the message carries the engine's error and line), ran over its time or memory limit, or a scene could not resolve the sketches it places.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many renders are running at once.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/blit/sketches/{id}/edit": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "description": "The sketch id. Must be a positive integer.",
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      ],
+      "patch": {
+        "tags": [
+          "Blit"
+        ],
+        "summary": "Find and replace inside a sketch's source",
+        "description": "Applies exact-text find/replace edits to the saved source, in order, each to the result of the one before, and saves the result in one write. Each `find` must match exactly one place unless `all` is true. If any edit matches nowhere, or more than once without `all`, nothing is saved and the answer is a 409 naming the edit. Answers the sketch WITHOUT its code, the number of replacements, the new length, and a lint of the saved source. Bumps `updated_at`.",
+        "operationId": "blit_edit_sketch",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "edits"
+                ],
+                "properties": {
+                  "edits": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 50,
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "find",
+                        "replace"
+                      ],
+                      "properties": {
+                        "find": {
+                          "type": "string",
+                          "minLength": 1,
+                          "description": "Exact text, whitespace included."
+                        },
+                        "replace": {
+                          "type": "string"
+                        },
+                        "all": {
+                          "type": "boolean",
+                          "default": false,
+                          "description": "Replace every occurrence."
+                        }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "edits": [
+                    {
+                      "find": "'#e43b44'",
+                      "replace": "'#41a6f6'"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved. The sketch without its code, plus `replacements`, `length` and `lint` ({ ok, diagnostics }).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The id is invalid, or `edits` is missing, empty, over 50, or has an edit without a non-empty `find` and a string `replace`, or the result is over 200000 characters.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such sketch, or it belongs to someone else.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "An edit's `find` matched nowhere, or more than one place without `all`. Nothing was saved.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "BlitStatus": {
+        "type": "object",
+        "description": "Envelope returned by GET /api/blit/status.",
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "example": true
+          },
+          "data": {
+            "type": "object",
+            "properties": {
+              "module": {
+                "type": "string",
+                "example": "blit"
+              },
+              "status": {
+                "type": "string",
+                "example": "operational"
+              },
+              "timestamp": {
+                "type": "string",
+                "format": "date-time",
+                "description": "The server's current time, ISO 8601.",
+                "example": "2026-09-19T12:00:00.000Z"
+              }
+            },
+            "required": [
+              "module",
+              "status",
+              "timestamp"
+            ]
+          }
+        },
+        "required": [
+          "success",
+          "data"
+        ]
+      },
+      "BlitLintDiagnostic": {
+        "type": "object",
+        "description": "One finding, positioned in the submitted code.",
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": [
+              "error",
+              "warning"
+            ],
+            "description": "An error means the sketch cannot run. A warning means it may not do what was intended."
+          },
+          "rule": {
+            "type": "string",
+            "enum": [
+              "syntax",
+              "unknown-name",
+              "unknown-method",
+              "no-output",
+              "redeclared"
+            ],
+            "description": "Which check fired. `syntax`: the grammar could not continue. `unknown-name`: an identifier neither in the language nor defined by the sketch. `unknown-method`: an operator a pattern does not have. `no-output`: statement form with no out() call. `redeclared`: a top-level declaration of a name the language already binds, which cannot compile."
+          },
+          "message": {
+            "type": "string",
+            "example": "A pattern has no `mirrror`."
+          },
+          "hint": {
+            "type": "string",
+            "description": "What to do about it. Present when the check has a candidate or a concrete next step.",
+            "example": "Did you mean `mirror`?"
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "1-based line in the submitted code.",
+            "example": 6
+          },
+          "column": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "1-based column in that line.",
+            "example": 21
+          }
+        },
+        "required": [
+          "severity",
+          "rule",
+          "message",
+          "line",
+          "column"
+        ]
+      },
+      "BlitLintResponse": {
+        "type": "object",
+        "description": "Envelope returned by POST /api/blit/lint.",
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "example": true
+          },
+          "data": {
+            "type": "object",
+            "properties": {
+              "ok": {
+                "type": "boolean",
+                "description": "True when no diagnostic has severity `error`. Warnings do not clear it.",
+                "example": false
+              },
+              "form": {
+                "type": "string",
+                "nullable": true,
+                "enum": [
+                  "expression",
+                  "statement",
+                  null
+                ],
+                "description": "Which shape the sketch compiles as, and so whether it needs out(). Null when it does not parse at all."
+              },
+              "diagnostics": {
+                "type": "array",
+                "description": "Findings in source order. Each distinct unknown name or operator is reported once.",
+                "items": {
+                  "$ref": "#/components/schemas/BlitLintDiagnostic"
+                }
+              },
+              "vocabulary": {
+                "type": "array",
+                "description": "Every global name a sketch has in scope, read off the evaluator's own scope object. Returned with every answer so a caller with no editor can learn the language's surface.",
+                "items": {
+                  "type": "string"
+                },
+                "example": [
+                  "sprite",
+                  "solid",
+                  "stack",
+                  "grad",
+                  "noise",
+                  "out"
+                ]
+              },
+              "operators": {
+                "type": "array",
+                "description": "Every method that answers another pattern, so a chain may continue off it. Read off the Pat class, minus the private machinery that happens to sit on its prototype.",
+                "items": {
+                  "type": "string"
+                },
+                "example": [
+                  "mirror",
+                  "scale",
+                  "pal",
+                  "jux",
+                  "euclid"
+                ]
+              }
+            },
+            "required": [
+              "ok",
+              "form",
+              "diagnostics",
+              "vocabulary",
+              "operators"
+            ]
+          }
+        },
+        "required": [
+          "success",
+          "data"
+        ]
+      },
+      "BlitSketchSummary": {
+        "type": "object",
+        "description": "A sketch without its source, as the list returns it.",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "example": 7
+          },
+          "name": {
+            "type": "string",
+            "example": "Ship"
+          },
+          "folder_id": {
+            "type": "integer",
+            "nullable": true,
+            "description": "The folder the sketch is filed in, or null at the top level.",
+            "example": 3
+          },
+          "created_at": {
+            "type": "string",
+            "example": "2026-09-19 11:58:02"
+          },
+          "updated_at": {
+            "type": "string",
+            "example": "2026-09-19 12:04:31"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "folder_id",
+          "created_at",
+          "updated_at"
+        ]
+      },
+      "BlitSketch": {
+        "type": "object",
+        "description": "A sketch with its source.",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "example": 7
+          },
+          "name": {
+            "type": "string",
+            "example": "Ship"
+          },
+          "code": {
+            "type": "string",
+            "description": "The sketch source, verbatim. Whitespace is significant: a sprite literal's indentation defines its grid.",
+            "example": "size(16, 16);\n\nout(sprite(`\n  .ww.\n  wwww\n`).scale(2).center());"
+          },
+          "zoom": {
+            "type": "integer",
+            "enum": [
+              1,
+              2,
+              4,
+              8,
+              12,
+              16
+            ],
+            "description": "How closely the canvas opens this sketch: the canvas is drawn at this many screen pixels per sketch pixel. One of 1, 2, 4, 8, 12 or 16 \u2014 the steps the editor offers \u2014 and anything else is a 400. Unlike the canvas size, the frame rate and the cycle length, zoom cannot be declared in the sketch, so it is stored per sketch here rather than per browser. Defaults to 2.",
+            "example": 2
+          },
+          "folder_id": {
+            "type": "integer",
+            "nullable": true,
+            "description": "The folder the sketch is filed in, or null at the top level.",
+            "example": 3
+          },
+          "created_at": {
+            "type": "string",
+            "example": "2026-09-19 11:58:02"
+          },
+          "updated_at": {
+            "type": "string",
+            "example": "2026-09-19 12:04:31"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "code",
+          "zoom",
+          "folder_id",
+          "created_at",
+          "updated_at"
+        ]
+      },
+      "BlitSketchResponse": {
+        "type": "object",
+        "description": "Envelope wrapping a single sketch.",
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "example": true
+          },
+          "data": {
+            "$ref": "#/components/schemas/BlitSketch"
+          }
+        },
+        "required": [
+          "success",
+          "data"
+        ]
+      },
+      "BlitImportOption": {
+        "type": "object",
+        "description": "One size the image could be imported at, with the numbers that decide it.",
+        "properties": {
+          "size": {
+            "type": "integer",
+            "description": "The longest side, and what to send back as `size`.",
+            "example": 32
+          },
+          "width": {
+            "type": "integer",
+            "description": "The grid's width at this size.",
+            "example": 32
+          },
+          "height": {
+            "type": "integer",
+            "description": "The grid's height at this size.",
+            "example": 24
+          },
+          "colors": {
+            "type": "integer",
+            "description": "Distinct visible colours the grid would have, measured on the resampled pixels rather than estimated.",
+            "example": 14
+          },
+          "exact": {
+            "type": "boolean",
+            "description": "Nothing is lost at this size: the image is a whole-number upscale of this grid, so the import recovers the original byte for byte."
+          },
+          "fits": {
+            "type": "boolean",
+            "description": "False when `colors` is past the 35 a grid can name, so this size would be refused."
+          }
+        }
+      },
+      "BlitImportedSprite": {
+        "type": "object",
+        "description": "The emitted grid and the palette that goes with it.",
+        "properties": {
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Grid rows, top to bottom, with no indentation. `.` is transparent, never a space: the grid parser trims trailing whitespace and would narrow a sprite whose right column is empty.",
+            "example": [
+              ".ww.",
+              "wwww"
+            ]
+          },
+          "width": {
+            "type": "integer",
+            "example": 4
+          },
+          "height": {
+            "type": "integer",
+            "example": 2
+          },
+          "bindings": {
+            "type": "array",
+            "description": "`[character, css]` pairs for every character `.pal()` has to bind, in first-seen order. A mnemonic letter whose default colour is already exactly right is absent.",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "example": [
+              [
+                "w",
+                "#c0cbdc"
+              ]
+            ]
+          },
+          "colors": {
+            "type": "integer",
+            "description": "Distinct visible colours in the grid.",
+            "example": 3
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Things that worked but will not be pleasant: a grid past 64 a side, a palette past 24 colours."
+          }
+        }
+      },
+      "BlitImportResponse": {
+        "type": "object",
+        "description": "Envelope returned by POST /api/blit/import.",
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "example": true
+          },
+          "data": {
+            "type": "object",
+            "properties": {
+              "source": {
+                "type": "object",
+                "description": "The file's own dimensions, before any resize.",
+                "properties": {
+                  "width": {
+                    "type": "integer",
+                    "example": 512
+                  },
+                  "height": {
+                    "type": "integer",
+                    "example": 512
+                  }
+                }
+              },
+              "options": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/BlitImportOption"
+                },
+                "description": "Sizes worth offering, smallest first. Empty when the image already fits a grid, because then there is nothing to choose."
+              },
+              "sprite": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/BlitImportedSprite"
+                  }
+                ],
+                "description": "Absent when no grid could be emitted; `refusal` then says why."
+              },
+              "sketch": {
+                "type": "string",
+                "description": "The same import as a complete sketch, `size()` and `out()` included. Present whenever `sprite` is. The editor uses `sprite` instead, because it chooses between a whole sketch and a bare expression at the cursor from what is already in the buffer.",
+                "example": "size(4, 2);\n\nout(sprite(`\n  .ww.\n  wwww\n`).pal({ w: '#c0cbdc' }));\n"
+              },
+              "refusal": {
+                "type": "string",
+                "description": "Why there is no `sprite`: the image needs a size and none was given, or the grid at that size needs more colours than a literal can name. Present only when `sprite` is absent."
+              }
+            }
+          }
+        }
+      },
+      "BlitFolder": {
+        "type": "object",
+        "description": "A folder in the caller's virtual file system of sketches. Folders nest through `parent_id`; a sketch's `folder_id` names the folder that holds it.",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "example": 3
+          },
+          "parent_id": {
+            "type": "integer",
+            "nullable": true,
+            "description": "The folder this one is inside, or null at the top level.",
+            "example": null
+          },
+          "name": {
+            "type": "string",
+            "example": "Enemies"
+          },
+          "created_at": {
+            "type": "string",
+            "example": "2026-09-22 10:00:00"
+          },
+          "updated_at": {
+            "type": "string",
+            "example": "2026-09-22 10:00:00"
+          }
+        },
+        "required": [
+          "id",
+          "parent_id",
+          "name",
+          "created_at",
+          "updated_at"
+        ]
+      },
+      "BlitFolderResponse": {
+        "type": "object",
+        "description": "Envelope wrapping a single folder.",
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "example": true
+          },
+          "data": {
+            "$ref": "#/components/schemas/BlitFolder"
+          }
+        },
+        "required": [
+          "success",
+          "data"
+        ]
+      },
+      "BlitFolderListResponse": {
+        "type": "object",
+        "description": "Envelope wrapping the caller's folders.",
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "example": true
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BlitFolder"
+            }
+          }
+        },
+        "required": [
+          "success",
+          "data"
+        ]
+      },
+      "BlitFolderDeleteResponse": {
+        "type": "object",
+        "description": "What deleting a folder moved, and where to.",
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "example": true
+          },
+          "data": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "integer",
+                "description": "The deleted folder.",
+                "example": 3
+              },
+              "parent_id": {
+                "type": "integer",
+                "nullable": true,
+                "description": "Where its contents went: its own parent, or null for the top level.",
+                "example": null
+              },
+              "moved_sketches": {
+                "type": "integer",
+                "minimum": 0,
+                "example": 4
+              },
+              "moved_folders": {
+                "type": "integer",
+                "minimum": 0,
+                "example": 1
+              }
+            },
+            "required": [
+              "id",
+              "parent_id",
+              "moved_sketches",
+              "moved_folders"
+            ]
+          }
+        },
+        "required": [
+          "success",
+          "data"
+        ]
+      }
+    }
+  }
+}
